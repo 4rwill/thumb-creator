@@ -1,406 +1,260 @@
 'use client';
 
-import {
-  forwardRef,
-  PointerEvent as ReactPointerEvent,
-  useCallback,
-  useEffect,
-  useImperativeHandle,
-  useRef,
-  useState,
-} from 'react';
+import { forwardRef, type PointerEvent, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import { layoutContent, palettes, templateConfigs, type Measure, type PaletteId, type TemplateId, type TextLayout } from '@/lib/thumbnail-layout';
 
-export type TemplateId = 'impacto' | 'lista' | 'explicacao';
-
-export type ThumbnailCanvasHandle = {
-  exportPng: () => Promise<void>;
-};
-
-type ThumbnailCanvasProps = {
-  category: string;
-  episode: string;
-  highlight: string;
-  photoDataUrl: string | null;
-  photoOffset: { x: number; y: number };
-  photoZoom: number;
-  showLogo: boolean;
-  showSafeArea: boolean;
-  subtitle: string;
-  template: TemplateId;
-  title: string;
+export type { TemplateId } from '@/lib/thumbnail-layout';
+export type ThumbnailCanvasHandle = { exportPng: () => Promise<void> };
+type Props = {
+  category: string; episode: string; showEpisode: boolean; palette: PaletteId;
+  highlight: string; photoDataUrl: string | null; photoOffset: { x: number; y: number };
+  photoZoom: number; showLogo: boolean; showSafeArea: boolean;
+  subtitle: string; template: TemplateId; title: string;
   onPhotoOffsetChange: (offset: { x: number; y: number }) => void;
+  onValidationChange: (message: string) => void;
 };
 
-type TemplateConfig = {
-  title: { x: number; y: number; width: number; fontSize: number; maxLines: number };
-  subtitle: { x: number; y: number; width: number };
-  photo: { x: number; y: number; width: number; height: number; radius: number };
-  logo: { x: number; y: number; width: number };
-};
-
-const ARTBOARD_WIDTH = 1080;
-const ARTBOARD_HEIGHT = 1920;
-
-const templateConfigs: Record<TemplateId, TemplateConfig> = {
-  impacto: {
-    title: { x: 86, y: 300, width: 890, fontSize: 122, maxLines: 5 },
-    subtitle: { x: 90, y: 930, width: 560 },
-    photo: { x: 485, y: 900, width: 595, height: 820, radius: 72 },
-    logo: { x: 82, y: 1530, width: 330 },
-  },
-  lista: {
-    title: { x: 78, y: 350, width: 610, fontSize: 104, maxLines: 6 },
-    subtitle: { x: 82, y: 1100, width: 470 },
-    photo: { x: 580, y: 450, width: 500, height: 1270, radius: 40 },
-    logo: { x: 76, y: 1510, width: 330 },
-  },
-  explicacao: {
-    title: { x: 90, y: 300, width: 900, fontSize: 116, maxLines: 5 },
-    subtitle: { x: 94, y: 790, width: 760 },
-    photo: { x: 120, y: 940, width: 840, height: 780, radius: 86 },
-    logo: { x: 694, y: 1540, width: 300 },
-  },
-};
-
-function useCanvasImage(src: string | null) {
-  const [image, setImage] = useState<HTMLImageElement | null>(null);
-
+function useImage(src: string | null) {
+  const [loaded, setLoaded] = useState<{ src: string; image: HTMLImageElement | null; error: boolean } | null>(null);
   useEffect(() => {
-    if (!src) {
-      setImage(null);
-      return;
-    }
-    const nextImage = new window.Image();
-    nextImage.decoding = 'async';
-    nextImage.onload = () => setImage(nextImage);
-    nextImage.src = src;
-    return () => {
-      nextImage.onload = null;
-    };
+    if (!src) return;
+    let cancelled = false;
+    const image = new window.Image();
+    image.onload = () => { if (!cancelled) setLoaded({ src, image, error: false }); };
+    image.onerror = () => { if (!cancelled) setLoaded({ src, image: null, error: true }); };
+    image.src = src;
+    return () => { cancelled = true; };
   }, [src]);
-
-  return image;
+  return { image: loaded?.src === src ? loaded.image : null, error: loaded?.src === src && loaded.error };
 }
 
-function normalizeWord(value: string) {
-  return value
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-zA-Z0-9]/g, '')
-    .toLowerCase();
+function normalize(value: string) {
+  return value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
 }
 
-function roundedRect(
-  context: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  radius: number,
-) {
+function rounded(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
   context.beginPath();
   context.roundRect(x, y, width, height, radius);
-  context.closePath();
 }
 
-function drawTitle(
-  context: CanvasRenderingContext2D,
-  config: TemplateConfig['title'],
-  title: string,
-  highlight: string,
-) {
-  const words = title.trim().toLocaleUpperCase('pt-BR').split(/\s+/).filter(Boolean);
-  const lineHeight = config.fontSize * 0.92;
-  const spaceWidth = config.fontSize * 0.3;
-  context.font = `800 ${config.fontSize}px Montserrat`;
-  context.textBaseline = 'top';
-  context.shadowColor = 'rgba(0,0,0,.2)';
-  context.shadowBlur = 6;
+export const ThumbnailCanvas = forwardRef<ThumbnailCanvasHandle, Props>(function ThumbnailCanvas(props, ref) {
+  const { category, episode, showEpisode, palette, highlight, photoDataUrl, photoOffset, photoZoom, showLogo, showSafeArea, subtitle, template, title, onPhotoOffsetChange, onValidationChange } = props;
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const holderRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ x: number; y: number; originX: number; originY: number } | null>(null);
+  const [scale, setScale] = useState(0.32);
+  const [fonts, setFonts] = useState<{ headline: string; body: string } | null>(null);
+  const [fontError, setFontError] = useState(false);
+  const photoAsset = useImage(photoDataUrl);
+  const logoAsset = useImage('/clemilson-financas-logo.png');
+  const photo = photoAsset.image;
+  const logo = logoAsset.image;
+  const config = templateConfigs[template];
+  const colors = palettes[palette];
+  const area = { ...config.photo, height: config.photo.height + (showLogo ? 0 : 280) };
 
-  let x = config.x;
-  let y = config.y;
-  let line = 1;
+  useEffect(() => {
+    let cancelled = false;
+    const style = getComputedStyle(document.body);
+    const headline = style.getPropertyValue('--font-montserrat').trim() || 'Montserrat';
+    const body = style.getPropertyValue('--font-inter').trim() || 'Inter';
+    Promise.all([document.fonts.load('800 100px ' + headline), document.fonts.load('600 34px ' + body)])
+      .then(() => document.fonts.ready)
+      .then(() => { if (!cancelled) setFonts({ headline, body }); })
+      .catch(() => { if (!cancelled) setFontError(true); });
+    return () => { cancelled = true; };
+  }, []);
 
-  for (const word of words) {
-    const width = context.measureText(word).width;
-    if (x > config.x && x + width > config.x + config.width) {
-      if (line >= config.maxLines) break;
-      x = config.x;
-      y += lineHeight;
-      line += 1;
-    }
-    context.fillStyle = normalizeWord(word) === normalizeWord(highlight) ? '#f4be50' : '#ffffff';
-    context.fillText(word, x, y);
-    x += width + spaceWidth;
-  }
-  context.shadowBlur = 0;
-}
+  useEffect(() => {
+    const holder = holderRef.current;
+    if (!holder) return;
+    const resize = () => setScale(Math.min(Math.max(160, holder.clientWidth - 40) / 1080, Math.max(320, holder.clientHeight - 40) / 1920));
+    resize();
+    const observer = new ResizeObserver(resize);
+    observer.observe(holder);
+    return () => observer.disconnect();
+  }, []);
 
-function drawWrappedText(
-  context: CanvasRenderingContext2D,
-  text: string,
-  x: number,
-  y: number,
-  maxWidth: number,
-  lineHeight: number,
-) {
-  const words = text.split(/\s+/);
-  let line = '';
-  let lineY = y;
-  for (const word of words) {
-    const test = line ? `${line} ${word}` : word;
-    if (context.measureText(test).width > maxWidth && line) {
-      context.fillText(line, x, lineY);
-      line = word;
-      lineY += lineHeight;
+  const draw = useCallback((): string => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (!ctx || !fonts) return fontError ? 'Não foi possível carregar as fontes. Recarregue a página.' : 'Carregando as fontes da marca…';
+    // Canvas state persists across renders: reset all text and paint settings.
+    ctx.resetTransform();
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.letterSpacing = '0px';
+    ctx.setLineDash([]);
+    ctx.clearRect(0, 0, 1080, 1920);
+    ctx.fillStyle = colors.background;
+    ctx.fillRect(0, 0, 1080, 1920);
+    ctx.strokeStyle = colors.accent;
+    ctx.globalAlpha = 0.22;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(1100, 1140, 650, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(1100, 1140, 590, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+
+    const photoArea = { ...config.photo, height: config.photo.height + (showLogo ? 0 : 280) };
+    ctx.save();
+    rounded(ctx, photoArea.x, photoArea.y, photoArea.width, photoArea.height, photoArea.radius);
+    ctx.clip();
+    ctx.fillStyle = colors.surface;
+    ctx.fillRect(photoArea.x, photoArea.y, photoArea.width, photoArea.height);
+    if (photo) {
+      const ratio = Math.max(photoArea.width / photo.width, photoArea.height / photo.height) * photoZoom;
+      const w = photo.width * ratio, h = photo.height * ratio;
+      const maxX = Math.max(0, (w - photoArea.width) / 2), maxY = Math.max(0, (h - photoArea.height) / 2);
+      const x = photoArea.x - maxX + Math.max(-maxX, Math.min(maxX, photoOffset.x));
+      const y = photoArea.y - maxY + Math.max(-maxY, Math.min(maxY, photoOffset.y));
+      ctx.drawImage(photo, x, y, w, h);
     } else {
-      line = test;
+      ctx.fillStyle = colors.muted;
+      ctx.font = '600 24px ' + fonts.body;
+      ctx.textAlign = 'center';
+      ctx.fillText('Adicione sua foto', photoArea.x + photoArea.width / 2, photoArea.y + photoArea.height / 2);
+      ctx.textAlign = 'left';
     }
-  }
-  if (line) context.fillText(line, x, lineY);
-}
+    ctx.restore();
 
-export const ThumbnailCanvas = forwardRef<ThumbnailCanvasHandle, ThumbnailCanvasProps>(
-  function ThumbnailCanvas(
-    {
-      category,
-      episode,
-      highlight,
-      photoDataUrl,
-      photoOffset,
-      photoZoom,
-      showLogo,
-      showSafeArea,
-      subtitle,
-      template,
-      title,
-      onPhotoOffsetChange,
-    },
-    ref,
-  ) {
-    const canvasRef = useRef<HTMLCanvasElement>(null);
-    const holderRef = useRef<HTMLDivElement>(null);
-    const dragRef = useRef<{ x: number; y: number; originX: number; originY: number } | null>(null);
-    const [scale, setScale] = useState(0.32);
-    const photo = useCanvasImage(photoDataUrl);
-    const logo = useCanvasImage('/clemilson-financas-logo.png');
-    const config = templateConfigs[template];
-
-    useEffect(() => {
-      const holder = holderRef.current;
-      if (!holder) return;
-      const updateScale = () => {
-        const availableWidth = Math.max(300, holder.clientWidth - 40);
-        const availableHeight = Math.max(480, holder.clientHeight - 40);
-        setScale(Math.min(availableWidth / ARTBOARD_WIDTH, availableHeight / ARTBOARD_HEIGHT));
-      };
-      updateScale();
-      const observer = new ResizeObserver(updateScale);
-      observer.observe(holder);
-      return () => observer.disconnect();
-    }, []);
-
-    const draw = useCallback(() => {
-      const canvas = canvasRef.current;
-      const context = canvas?.getContext('2d');
-      if (!canvas || !context) return;
-
-      context.clearRect(0, 0, ARTBOARD_WIDTH, ARTBOARD_HEIGHT);
-      context.fillStyle = '#011023';
-      context.fillRect(0, 0, ARTBOARD_WIDTH, ARTBOARD_HEIGHT);
-
-      const halo = context.createRadialGradient(940, 250, 0, 940, 250, 470);
-      halo.addColorStop(0, 'rgba(198,149,42,.22)');
-      halo.addColorStop(1, 'rgba(198,149,42,0)');
-      context.fillStyle = halo;
-      context.fillRect(0, 0, ARTBOARD_WIDTH, 760);
-
-      context.strokeStyle = 'rgba(198,149,42,.38)';
-      context.lineWidth = 5;
-      context.beginPath();
-      context.arc(1050, 1200, 610, 0, Math.PI * 2);
-      context.stroke();
-      context.strokeStyle = 'rgba(244,212,142,.2)';
-      context.lineWidth = 2;
-      context.beginPath();
-      context.arc(1070, 1210, 490, 0, Math.PI * 2);
-      context.stroke();
-
-      context.strokeStyle = 'rgba(198,149,42,.65)';
-      context.lineWidth = 7;
-      context.beginPath();
-      context.moveTo(40, 1800);
-      context.bezierCurveTo(320, 1720, 470, 1890, 720, 1770);
-      context.bezierCurveTo(890, 1700, 1010, 1590, 1110, 1510);
-      context.stroke();
-
-      if (photo) {
-        const photoConfig = config.photo;
-        const baseScale = Math.max(photoConfig.width / photo.width, photoConfig.height / photo.height);
-        const width = photo.width * baseScale * photoZoom;
-        const height = photo.height * baseScale * photoZoom;
-        const x = photoConfig.x - (width - photoConfig.width) / 2 + photoOffset.x;
-        const y = photoConfig.y - (height - photoConfig.height) / 2 + photoOffset.y;
-        context.save();
-        roundedRect(context, photoConfig.x, photoConfig.y, photoConfig.width, photoConfig.height, photoConfig.radius);
-        context.clip();
-        context.drawImage(photo, x, y, width, height);
-        context.restore();
-
-        if (template !== 'explicacao') {
-          const overlay = context.createLinearGradient(0, 0, 730, 0);
-          overlay.addColorStop(0, '#011023');
-          overlay.addColorStop(0.68, 'rgba(1,16,35,.9)');
-          overlay.addColorStop(1, 'rgba(1,16,35,0)');
-          context.fillStyle = overlay;
-          context.fillRect(0, 180, 730, 1400);
+    const measure = (family: string, weight: number): Measure => (text, size) => {
+      ctx.font = weight + ' ' + size + 'px ' + family;
+      const metrics = ctx.measureText(text);
+      return { width: metrics.width, ascent: metrics.actualBoundingBoxAscent, descent: metrics.actualBoundingBoxDescent };
+    };
+    const layout = layoutContent(template, title, subtitle, measure(fonts.headline, 800), measure(fonts.body, 600));
+    const errors: string[] = [];
+    if (!title.trim()) errors.push('Escreva o título da capa.');
+    if (!layout.main.fits) errors.push('O título não cabe neste template. Encurte o texto ou escolha outro modelo.');
+    if (!layout.secondary.fits) errors.push('O subtítulo não cabe. Encurte o texto.');
+    const drawBlock = (block: TextLayout, x: number, y: number, width: number, family: string, weight: number, color: string, highlightWord = '') => {
+      if (!block.fits) return;
+      ctx.font = weight + ' ' + block.size + 'px ' + family;
+      ctx.textBaseline = 'alphabetic';
+      block.lines.forEach((line, index) => {
+        const baseline = y + block.ascent + index * block.lineHeight;
+        ctx.fillStyle = color;
+        ctx.fillText(line, x, baseline);
+        if (!highlightWord.trim()) return;
+        for (const match of line.matchAll(/\S+/g)) {
+          if (normalize(match[0]) !== normalize(highlightWord)) continue;
+          const start = ctx.measureText(line.slice(0, match.index)).width;
+          const end = ctx.measureText(line.slice(0, match.index! + match[0].length)).width;
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(x + start, baseline - block.ascent, Math.min(end - start, width), block.ascent + block.descent);
+          ctx.clip();
+          ctx.fillStyle = colors.accent;
+          ctx.fillText(line, x, baseline);
+          ctx.restore();
         }
-      } else {
-        context.fillStyle = '#0b2037';
-        context.strokeStyle = 'rgba(244,212,142,.42)';
-        context.lineWidth = 3;
-        context.setLineDash([18, 14]);
-        roundedRect(context, config.photo.x, config.photo.y, config.photo.width, config.photo.height, config.photo.radius);
-        context.fill();
-        context.stroke();
-        context.setLineDash([]);
-        context.strokeStyle = '#c6952a';
-        context.lineWidth = 4;
-        context.beginPath();
-        context.arc(config.photo.x + config.photo.width / 2, config.photo.y + config.photo.height / 2 - 36, 42, 0, Math.PI * 2);
-        context.stroke();
-        context.fillStyle = '#c9ced5';
-        context.font = '700 22px Inter';
-        context.textAlign = 'center';
-        context.letterSpacing = '3px';
-        context.fillText('ADICIONE SUA FOTO', config.photo.x + config.photo.width / 2, config.photo.y + config.photo.height / 2 + 68);
-        context.textAlign = 'left';
-        context.letterSpacing = '0px';
-      }
-
-      context.fillStyle = 'rgba(1,16,35,.88)';
-      context.strokeStyle = '#e2c37f';
-      context.lineWidth = 2;
-      roundedRect(context, 80, 92, 430, 66, 33);
-      context.fill();
-      context.stroke();
-      context.fillStyle = '#f4d48e';
-      context.font = '700 24px Inter';
-      context.textAlign = 'center';
-      context.letterSpacing = '3px';
-      context.fillText(category.toLocaleUpperCase('pt-BR'), 295, 134);
-      context.textAlign = 'right';
-      context.letterSpacing = '0px';
-      context.font = '800 34px Montserrat';
-      context.fillStyle = '#ffffff';
-      context.fillText(`EP. ${episode || '—'}`, 1000, 137);
-      context.textAlign = 'left';
-
-      drawTitle(context, config.title, title || 'Digite o título', highlight);
-
-      if (subtitle) {
-        context.fillStyle = '#c9ced5';
-        context.font = '700 34px Inter';
-        context.textBaseline = 'top';
-        drawWrappedText(context, subtitle, config.subtitle.x, config.subtitle.y, config.subtitle.width, 46);
-      }
-
-      if (showLogo && logo) {
-        const logoHeight = (config.logo.width * logo.height) / logo.width;
-        context.drawImage(logo, config.logo.x, config.logo.y, config.logo.width, logoHeight);
-      }
-
-      context.fillStyle = 'rgba(198,149,42,.65)';
-      context.fillRect(80, 1814, 920, 2);
-    }, [category, config, episode, highlight, logo, photo, photoOffset, photoZoom, showLogo, subtitle, template, title]);
-
-    useEffect(() => {
-      void document.fonts.ready.then(draw);
-    }, [draw]);
-
-    useImperativeHandle(ref, () => ({
-      async exportPng() {
-        await document.fonts.ready;
-        draw();
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        const slug = `${category}-${episode || 'sem-episodio'}-${title}`
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, '-')
-          .replace(/(^-|-$)/g, '')
-          .slice(0, 86);
-        const link = document.createElement('a');
-        link.download = `${slug || 'thumbnail-clemilson-financas'}.png`;
-        link.href = canvas.toDataURL('image/png');
-        link.click();
-      },
-    }), [category, draw, episode, title]);
-
-    const pointerPosition = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-      const rect = event.currentTarget.getBoundingClientRect();
-      return {
-        x: ((event.clientX - rect.left) / rect.width) * ARTBOARD_WIDTH,
-        y: ((event.clientY - rect.top) / rect.height) * ARTBOARD_HEIGHT,
-      };
-    };
-
-    const handlePointerDown = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-      if (!photo) return;
-      const point = pointerPosition(event);
-      const area = config.photo;
-      if (point.x < area.x || point.x > area.x + area.width || point.y < area.y || point.y > area.y + area.height) return;
-      event.currentTarget.setPointerCapture(event.pointerId);
-      dragRef.current = { x: point.x, y: point.y, originX: photoOffset.x, originY: photoOffset.y };
-    };
-
-    const handlePointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-      const drag = dragRef.current;
-      if (!drag || !photo) return;
-      const point = pointerPosition(event);
-      const baseScale = Math.max(config.photo.width / photo.width, config.photo.height / photo.height);
-      const width = photo.width * baseScale * photoZoom;
-      const height = photo.height * baseScale * photoZoom;
-      const maxX = Math.max(0, (width - config.photo.width) / 2);
-      const maxY = Math.max(0, (height - config.photo.height) / 2);
-      onPhotoOffsetChange({
-        x: Math.max(-maxX, Math.min(maxX, drag.originX + point.x - drag.x)),
-        y: Math.max(-maxY, Math.min(maxY, drag.originY + point.y - drag.y)),
       });
     };
+    drawBlock(layout.main, config.text.x, config.text.y, config.text.width, fonts.headline, 800, colors.text, highlight);
+    drawBlock(layout.secondary, config.text.x, layout.subtitleY, config.text.width, fonts.body, 600, colors.muted);
 
-    const finishDrag = (event: ReactPointerEvent<HTMLCanvasElement>) => {
-      dragRef.current = null;
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId);
+    const categoryMax = showEpisode ? 670 : 920;
+    if (category.trim()) {
+      const label = category.trim().toLocaleUpperCase('pt-BR');
+      const labelMeasure = measure(fonts.body, 700);
+      let size = 26;
+      while (size > 20 && labelMeasure(label, size).width > categoryMax - 40) size -= 2;
+      const labelWidth = labelMeasure(label, size).width;
+      if (labelWidth > categoryMax - 40) errors.push('O nome da categoria está longo demais para o cabeçalho.');
+      else {
+        ctx.strokeStyle = colors.accent;
+        ctx.lineWidth = 2;
+        rounded(ctx, 80, 150, labelWidth + 40, 64, 32);
+        ctx.stroke();
+        ctx.fillStyle = colors.text;
+        ctx.font = '700 ' + size + 'px ' + fonts.body;
+        ctx.fillText(label, 100, 192);
       }
-    };
+    }
+    if (showEpisode) {
+      if (!/^\d{1,3}$/.test(episode)) errors.push('Informe o número do episódio ou desative sua exibição.');
+      else {
+        ctx.textAlign = 'right';
+        ctx.font = '800 32px ' + fonts.headline;
+        ctx.fillStyle = colors.text;
+        ctx.fillText('EP. ' + episode.padStart(2, '0'), 1000, 194);
+        ctx.textAlign = 'left';
+      }
+    }
+    if (showLogo && logo) {
+      // Keep the supplied white lettering legible on the light palettes.
+      if (palette === 'gold' || palette === 'ivory') {
+        ctx.fillStyle = '#011023';
+        rounded(ctx, config.logo.x - 18, config.logo.y - 12, config.logo.width + 36, config.logo.width * logo.height / logo.width + 24, 24);
+        ctx.fill();
+      }
+      ctx.drawImage(logo, config.logo.x, config.logo.y, config.logo.width, config.logo.width * logo.height / logo.width);
+    }
+    if (photoDataUrl && !photo) errors.push(photoAsset.error ? 'A foto não pôde ser carregada. Escolha outra imagem.' : 'Carregando a foto…');
+    if (showLogo && !logo) errors.push(logoAsset.error ? 'A logo não pôde ser carregada.' : 'Carregando a logo…');
+    if (errors.length && !layout.fits) {
+      ctx.fillStyle = colors.muted;
+      ctx.font = '600 28px ' + fonts.body;
+      ctx.fillText('Ajuste o texto para visualizar a composição.', 80, 255);
+    }
+    return errors.join(' ');
+  }, [category, episode, showEpisode, palette, highlight, photoDataUrl, photoOffset, photoZoom, showLogo, subtitle, template, title, config, colors, fonts, fontError, photo, logo, photoAsset.error, logoAsset.error]);
 
-    return (
-      <div ref={holderRef} className="relative flex h-full min-h-[560px] w-full items-center justify-center overflow-hidden p-5">
-        <div
-          className="relative overflow-hidden rounded-[18px] border border-[rgba(244,212,142,.32)] shadow-[0_28px_80px_rgba(0,0,0,.48)]"
-          style={{ width: ARTBOARD_WIDTH * scale, height: ARTBOARD_HEIGHT * scale }}
-        >
-          <canvas
-            ref={canvasRef}
-            width={ARTBOARD_WIDTH}
-            height={ARTBOARD_HEIGHT}
-            aria-label="Pré-visualização editável da thumbnail"
-            className={`block h-full w-full ${photo ? 'cursor-grab active:cursor-grabbing' : ''}`}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={finishDrag}
-            onPointerCancel={finishDrag}
-          />
-          {showSafeArea && (
-            <div className="pointer-events-none absolute inset-[7%_6%] rounded-lg border border-dashed border-[rgba(244,190,80,.52)]">
-              <span className="absolute -top-5 right-0 text-[8px] font-bold tracking-[.12em] text-[#f4be50]/80 uppercase">Área segura</span>
-            </div>
-          )}
-        </div>
+  useEffect(() => { onValidationChange(draw()); }, [draw, onValidationChange]);
+
+  useImperativeHandle(ref, () => ({
+    async exportPng() {
+      const error = draw();
+      if (error) throw new Error(error);
+      const canvas = canvasRef.current;
+      if (!canvas) throw new Error('A prévia ainda não está pronta.');
+      const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error('Não foi possível gerar o PNG.')), 'image/png'));
+      const slug = [category, showEpisode ? 'ep-' + episode.padStart(2, '0') : '', title].filter(Boolean).join('-').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 100);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.download = (slug || 'clemilson-financas') + '.png';
+      link.href = url;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    },
+  }), [category, episode, showEpisode, title, draw]);
+
+  const point = (event: PointerEvent<HTMLCanvasElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return { x: (event.clientX - rect.left) / rect.width * 1080, y: (event.clientY - rect.top) / rect.height * 1920 };
+  };
+  const startDrag = (event: PointerEvent<HTMLCanvasElement>) => {
+    if (!photo) return;
+    const p = point(event);
+    if (p.x < area.x || p.x > area.x + area.width || p.y < area.y || p.y > area.y + area.height) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = { ...p, originX: photoOffset.x, originY: photoOffset.y };
+  };
+  const moveDrag = (event: PointerEvent<HTMLCanvasElement>) => {
+    const drag = dragRef.current;
+    if (!drag || !photo) return;
+    const p = point(event);
+    const ratio = Math.max(area.width / photo.width, area.height / photo.height) * photoZoom;
+    const maxX = (photo.width * ratio - area.width) / 2, maxY = (photo.height * ratio - area.height) / 2;
+    onPhotoOffsetChange({ x: Math.max(-maxX, Math.min(maxX, drag.originX + p.x - drag.x)), y: Math.max(-maxY, Math.min(maxY, drag.originY + p.y - drag.y)) });
+  };
+  const stopDrag = (event: PointerEvent<HTMLCanvasElement>) => {
+    dragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+
+  return (
+    <div ref={holderRef} className="relative flex min-h-0 h-full w-full items-center justify-center overflow-hidden p-5">
+      <div className="relative shrink-0 overflow-hidden border border-white/20 shadow-[0_28px_80px_rgba(0,0,0,.48)]" style={{ width: 1080 * scale, height: 1920 * scale }}>
+        <canvas ref={canvasRef} width={1080} height={1920} aria-label="Pré-visualização editável da thumbnail" className={`block h-full w-full touch-none ${photo ? 'cursor-grab active:cursor-grabbing' : ''}`} onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={stopDrag} onPointerCancel={stopDrag} />
+        {showSafeArea && <div className="pointer-events-none absolute inset-[7%_6%] border border-dashed border-blue-400/80"><span className="absolute -top-5 right-0 bg-[#011023] px-1 text-[12px] text-white">Guia de margem</span></div>}
       </div>
-    );
-  },
-);
+    </div>
+  );
+});

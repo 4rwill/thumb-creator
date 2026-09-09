@@ -1,6 +1,8 @@
 'use client';
 
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
+import { palettes, type PaletteId } from '@/lib/thumbnail-layout';
 import {
   Check,
   Download,
@@ -43,11 +45,13 @@ const categories = [
   'Finanças pessoais',
 ] as const;
 
-type Category = (typeof categories)[number];
+type Category = string;
 
 type SavedDraft = {
   category: Category;
   episode: string;
+  showEpisode: boolean;
+  palette: PaletteId;
   highlight: string;
   photoDataUrl: string | null;
   photoOffset: { x: number; y: number };
@@ -78,6 +82,8 @@ declare global {
 const initialDraft: SavedDraft = {
   category: 'Educação financeira',
   episode: '05',
+  showEpisode: true,
+  palette: 'navy',
   highlight: 'dinheiro',
   photoDataUrl: null,
   photoOffset: { x: 0, y: 0 },
@@ -138,6 +144,8 @@ export default function Home() {
   const [photoError, setPhotoError] = useState('');
   const [processingPhoto, setProcessingPhoto] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [layoutError, setLayoutError] = useState('Preparando a prévia…');
+  const [exportError, setExportError] = useState('');
   const photoInputRef = useRef<HTMLInputElement>(null);
   const canvasRef = useRef<ThumbnailCanvasHandle>(null);
   const stateRef = useRef(draft);
@@ -150,7 +158,22 @@ export default function Home() {
   useEffect(() => {
     try {
       const saved = window.localStorage.getItem('clemilson-thumbnail-draft');
-      if (saved) setDraft({ ...initialDraft, ...(JSON.parse(saved) as Partial<SavedDraft>) });
+      if (saved) {
+        const value = JSON.parse(saved) as Partial<SavedDraft>;
+        const restored = { ...initialDraft, ...value };
+        if (!templates.some(item => item.id === restored.template)) restored.template = initialDraft.template;
+        if (!Object.hasOwn(palettes, restored.palette)) restored.palette = 'navy';
+        for (const key of ['category', 'episode', 'title', 'subtitle', 'highlight'] as const) {
+          if (typeof restored[key] !== 'string') restored[key] = initialDraft[key];
+        }
+        if (typeof restored.showEpisode !== 'boolean') restored.showEpisode = true;
+        if (typeof restored.showLogo !== 'boolean') restored.showLogo = true;
+        if (!Number.isFinite(restored.photoZoom)) restored.photoZoom = 1;
+        restored.photoZoom = Math.max(1, Math.min(2.4, restored.photoZoom));
+        if (!Number.isFinite(restored.photoOffset?.x) || !Number.isFinite(restored.photoOffset?.y)) restored.photoOffset = { x: 0, y: 0 };
+        if (typeof restored.photoDataUrl !== 'string' || !/^data:image\/(png|jpeg|webp);base64,/.test(restored.photoDataUrl)) restored.photoDataUrl = null;
+        setDraft(restored);
+      }
     } catch {
       setSaveStatus('local-only');
     } finally {
@@ -185,7 +208,6 @@ export default function Home() {
     if (!context?.registerTool) return;
     const lifecycle = new AbortController();
 
-    const validCategories = [...categories];
     const validTemplates = templates.map((item) => item.id);
 
     void Promise.resolve(
@@ -197,10 +219,12 @@ export default function Home() {
           inputSchema: {
             type: 'object',
             properties: {
-              category: { type: 'string', enum: validCategories },
+              category: { type: 'string', maxLength: 40 },
+              palette: { type: 'string', enum: Object.keys(palettes) },
+              showEpisode: { type: 'boolean' },
               template: { type: 'string', enum: validTemplates },
               episode: { type: 'string', maxLength: 3 },
-              title: { type: 'string', minLength: 1, maxLength: 58 },
+              title: { type: 'string', minLength: 1, maxLength: 120 },
               highlight: { type: 'string', maxLength: 24 },
               subtitle: { type: 'string', maxLength: 64 },
               showLogo: { type: 'boolean' },
@@ -213,22 +237,35 @@ export default function Home() {
               throw new Error('Configuração inválida.');
             }
             const values = input as Record<string, unknown>;
+            const lengths: Record<string, number> = { category: 40, episode: 3, title: 120, highlight: 24, subtitle: 64 };
+            for (const [key, value] of Object.entries(values)) {
+              if (key in lengths) {
+                if (typeof value !== 'string' || value.length > lengths[key] || (key === 'title' && !value.trim())) throw new Error('Texto inválido: ' + key);
+              } else if (key === 'showLogo' || key === 'showEpisode') {
+                if (typeof value !== 'boolean') throw new Error('Valor inválido: ' + key);
+              } else if (key === 'palette') {
+                if (typeof value !== 'string' || !Object.hasOwn(palettes, value)) throw new Error('Paleta inválida.');
+              } else if (key === 'template') {
+                if (!validTemplates.includes(value as TemplateId)) throw new Error('Template inválido.');
+              } else throw new Error('Campo desconhecido: ' + key);
+            }
+            if (typeof values.episode === 'string' && !/^\d{0,3}$/.test(values.episode)) throw new Error('Número de episódio inválido.');
             const current = stateRef.current;
             const next: SavedDraft = {
               ...current,
-              category: validCategories.includes(values.category as Category)
-                ? (values.category as Category)
-                : current.category,
+              category: typeof values.category === 'string' ? values.category : current.category,
+              palette: typeof values.palette === 'string' ? values.palette as PaletteId : current.palette,
+              showEpisode: typeof values.showEpisode === 'boolean' ? values.showEpisode : current.showEpisode,
               template: validTemplates.includes(values.template as TemplateId)
                 ? (values.template as TemplateId)
                 : current.template,
               episode: typeof values.episode === 'string' ? values.episode.replace(/\D/g, '').slice(0, 3) : current.episode,
-              title: typeof values.title === 'string' ? values.title.slice(0, 58) : current.title,
+              title: typeof values.title === 'string' ? values.title : current.title,
               highlight: typeof values.highlight === 'string' ? values.highlight.slice(0, 24) : current.highlight,
               subtitle: typeof values.subtitle === 'string' ? values.subtitle.slice(0, 64) : current.subtitle,
               showLogo: typeof values.showLogo === 'boolean' ? values.showLogo : current.showLogo,
             };
-            setDraft(next);
+            flushSync(() => setDraft(next));
             return {
               status: 'configured',
               category: next.category,
@@ -253,6 +290,8 @@ export default function Home() {
             const current = stateRef.current;
             return {
               category: current.category,
+              palette: current.palette,
+              showEpisode: current.showEpisode,
               episode: current.episode,
               highlight: current.highlight,
               showLogo: current.showLogo,
@@ -271,14 +310,13 @@ export default function Home() {
 
   const titleCount = draft.title.length;
   const titleStatus = useMemo(() => {
-    if (titleCount > 58) return 'Limite ultrapassado';
-    if (titleCount > 48) return 'Próximo do limite';
-    return 'Bom tamanho';
+    if (titleCount > 120) return 'Limite ultrapassado';
+    return 'Ajuste automático';
   }, [titleCount]);
   const highlightIsValid = !draft.highlight.trim() || draft.title
     .split(/\s+/)
     .some((word) => normalizeWord(word) === normalizeWord(draft.highlight));
-  const canExport = titleCount > 0 && titleCount <= 58 && highlightIsValid && !processingPhoto;
+  const canExport = !!draft.title.trim() && titleCount <= 120 && highlightIsValid && !processingPhoto && !layoutError;
 
   const handlePhoto = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -300,8 +338,11 @@ export default function Home() {
   const handleExport = async () => {
     if (!canExport || !canvasRef.current) return;
     setExporting(true);
+    setExportError('');
     try {
       await canvasRef.current.exportPng();
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : 'Não foi possível exportar. Tente novamente.');
     } finally {
       window.setTimeout(() => setExporting(false), 450);
     }
@@ -356,21 +397,18 @@ export default function Home() {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-2">
                 <Label htmlFor="category">Categoria</Label>
-                <Select value={draft.category} onValueChange={(value) => patchDraft({ category: value as Category })}>
-                  <SelectTrigger id="category" className="h-10 w-full border-white/10 bg-[#090f14]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {categories.map((item) => <SelectItem key={item} value={item}>{item}</SelectItem>)}
-                  </SelectContent>
-                </Select>
+                <Input id="category" list="category-suggestions" value={draft.category} maxLength={40} onChange={event => patchDraft({ category: event.target.value })} placeholder="Digite o nome" className="h-10 border-white/10 bg-[#090f14]" />
+                <datalist id="category-suggestions">{categories.map(item => <option key={item} value={item} />)}</datalist>
+                <p className="text-xs text-[#8e9197]">Digite livremente. Vazio oculta a categoria.</p>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="episode">Episódio</Label>
+                <div className="flex items-center justify-between gap-2"><Label htmlFor="episode-switch">Exibir episódio</Label><Switch id="episode-switch" checked={draft.showEpisode} onCheckedChange={showEpisode => patchDraft({ showEpisode })} /></div>
                 <div className="flex h-10 overflow-hidden rounded-lg border border-white/10 bg-[#090f14] focus-within:border-[#c6952a]">
                   <span className="grid place-items-center border-r border-white/10 px-3 text-xs font-bold text-[#f4d48e]">EP.</span>
                   <Input
                     id="episode"
+                    aria-label="Número do episódio"
+                    disabled={!draft.showEpisode}
                     value={draft.episode}
                     onChange={(event) => patchDraft({ episode: event.target.value.replace(/\D/g, '').slice(0, 3) })}
                     className="h-full rounded-none border-0 bg-transparent text-center font-bold focus-visible:ring-0"
@@ -378,6 +416,15 @@ export default function Home() {
                   />
                 </div>
               </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="palette">Cor principal da capa</Label>
+              <Select value={draft.palette} onValueChange={value => { if (typeof value === 'string' && Object.hasOwn(palettes, value)) patchDraft({ palette: value as PaletteId }); }}>
+                <SelectTrigger id="palette" className="h-10 w-full border-white/10 bg-[#090f14]"><SelectValue>{palettes[draft.palette].name}</SelectValue></SelectTrigger>
+                <SelectContent>{Object.entries(palettes).map(([id, colors]) => <SelectItem key={id} value={id}><span aria-hidden="true" className="size-4 rounded-full border border-white/30" style={{ background: colors.background }} />{colors.name}</SelectItem>)}</SelectContent>
+              </Select>
+              <p className="text-xs text-[#8e9197]">Textos e destaques acompanham a cor para manter o contraste.</p>
             </div>
 
             <section className="space-y-3">
@@ -410,8 +457,8 @@ export default function Home() {
             <div className="space-y-2">
               <div className="flex items-end justify-between gap-3">
                 <Label htmlFor="title">Título principal</Label>
-                <span className={`text-xs ${titleCount > 58 ? 'text-[#ffb4ab]' : titleCount > 48 ? 'text-[#f4be50]' : 'text-[#8e9197]'}`}>
-                  {titleCount}/58 · {titleStatus}
+                <span className={`text-xs ${titleCount > 120 ? 'text-[#ffb4ab]' : 'text-[#8e9197]'}`}>
+                  {titleCount}/120 · {titleStatus}
                 </span>
               </div>
               <Textarea
@@ -419,8 +466,9 @@ export default function Home() {
                 value={draft.title}
                 onChange={(event) => patchDraft({ title: event.target.value })}
                 className="min-h-24 resize-none border-white/10 bg-[#090f14] leading-6"
-                aria-invalid={titleCount > 58}
+                aria-invalid={titleCount > 120 || !!layoutError}
               />
+              <p className="text-xs text-[#8e9197]">Use Enter para sugerir uma quebra de linha.</p>
             </div>
 
             <div className="space-y-2">
@@ -503,6 +551,7 @@ export default function Home() {
               </div>
             </div>
 
+            {(layoutError || exportError) && <p role="status" className="rounded-lg border border-[#ffb4ab]/30 p-3 text-sm text-[#ffb4ab]">{exportError || layoutError}</p>}
             <Button
               size="lg"
               disabled={!canExport || exporting}
@@ -515,8 +564,8 @@ export default function Home() {
           </div>
         </aside>
 
-        <section className="flex min-h-[720px] flex-col overflow-hidden rounded-2xl border bg-[#0e1419]/72 shadow-[0_18px_50px_rgba(0,0,0,.22)] xl:min-h-[calc(100vh-112px)]">
-          <div className="flex h-14 items-center justify-between border-b px-5">
+        <section className="flex h-[720px] min-h-0 flex-col overflow-hidden rounded-2xl border bg-[#0e1419]/72 shadow-[0_18px_50px_rgba(0,0,0,.22)] xl:h-[calc(100vh-112px)]">
+          <div className="flex h-14 shrink-0 items-center justify-between border-b px-5">
             <div className="flex items-center gap-2">
               <Eye className="size-4 text-[#f4be50]" />
               <h1 className="text-sm font-semibold text-white">Pré-visualização</h1>
@@ -528,12 +577,14 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="relative flex flex-1 overflow-hidden">
+          <div className="relative flex min-h-0 flex-1 overflow-hidden">
             <div className="absolute inset-0 opacity-[0.035] [background-image:linear-gradient(rgba(255,255,255,.8)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,.8)_1px,transparent_1px)] [background-size:32px_32px]" />
             <ThumbnailCanvas
               ref={canvasRef}
               category={draft.category}
               episode={draft.episode}
+              showEpisode={draft.showEpisode}
+              palette={draft.palette}
               highlight={draft.highlight}
               photoDataUrl={draft.photoDataUrl}
               photoOffset={draft.photoOffset}
@@ -544,6 +595,7 @@ export default function Home() {
               template={draft.template}
               title={draft.title}
               onPhotoOffsetChange={(photoOffset) => patchDraft({ photoOffset })}
+              onValidationChange={setLayoutError}
             />
           </div>
         </section>
