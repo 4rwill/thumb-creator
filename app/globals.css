@@ -1,0 +1,104 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import 'shadcn/tailwind.css';
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --font-sans: var(--font-inter);
+  --font-heading: var(--font-montserrat);
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-2xl: 1.5rem;
+}
+
+:root,
+.dark {
+  --background: #090f14;
+  --foreground: #dee3ea;
+  --card: #06172b;
+  --card-foreground: #f8f6f1;
+  --popover: #0b2037;
+  --popover-foreground: #f8f6f1;
+  --primary: #c6952a;
+  --primary-foreground: #011023;
+  --secondary: #171c21;
+  --secondary-foreground: #f4d48e;
+  --muted: #1b2025;
+  --muted-foreground: #c9ced5;
+  --accent: #0b2037;
+  --accent-foreground: #f4d48e;
+  --destructive: #ffb4ab;
+  --border: rgba(198, 149, 42, 0.28);
+  --input: rgba(255, 255, 255, 0.12);
+  --ring: #f4be50;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html {
+    @apply bg-background font-sans;
+  }
+
+  body {
+    @apply min-h-screen bg-background text-foreground;
+    font-family: var(--font-inter), Arial, Helvetica, sans-serif;
+    background-image:
+      radial-gradient(circle at 72% -10%, rgba(198, 149, 42, 0.1), transparent 28rem),
+      linear-gradient(135deg, #090f14 0%, #0e1419 48%, #06172b 100%);
+  }
+
+  button,
+  input,
+  textarea {
+    font: inherit;
+  }
+}
+
+::selection {
+  background: rgba(244, 190, 80, 0.35);
+  color: #ffffff;
+}
+
+.font-heading {
+  font-family: var(--font-montserrat), Arial, sans-serif;
+}
+
+.gold-gradient {
+  background: linear-gradient(135deg, #c6952a 0%, #f4d48e 52%, #c6952a 100%);
+}
+
+.gold-text {
+  background: linear-gradient(135deg, #c6952a 0%, #f4d48e 52%, #c6952a 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.editor-scrollbar {
+  scrollbar-color: rgba(198, 149, 42, 0.45) transparent;
+  scrollbar-width: thin;
+}
